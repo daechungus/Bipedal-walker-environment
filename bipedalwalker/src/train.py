@@ -5,6 +5,7 @@ import numpy as np
 from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import EvalCallback, CheckpointCallback
 from stable_baselines3.common.monitor import Monitor
+from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 import os
 
 def train_baseline_ppo(
@@ -21,6 +22,9 @@ def train_baseline_ppo(
     Train a baseline PPO agent on BipedalWalker environment.
     This will likely fail initially - the walker will fall over or twitch.
     
+    The environment is wrapped with VecNormalize to normalize the 24 observations
+    that have different scales. This helps with training stability and convergence.
+    
     Args:
         env_name: Name of the gymnasium environment
         total_timesteps: Total number of training timesteps
@@ -30,23 +34,63 @@ def train_baseline_ppo(
         log_dir: Directory for tensorboard logs
         eval_freq: Frequency of evaluation (in timesteps)
         n_eval_episodes: Number of episodes for evaluation
+    
+    Returns:
+        model: Trained PPO model
+        train_env: VecNormalize-wrapped training environment (contains normalization stats)
     """
     # Create directories
     os.makedirs(save_dir, exist_ok=True)
     os.makedirs(log_dir, exist_ok=True)
     
-    # Create training environment
-    print(f"Creating training environment: {env_name}")
-    train_env = gym.make(env_name)
-    train_env = Monitor(train_env, log_dir)
+    # Helper function to create and wrap environment
+    def make_env(render_mode=None, monitor_dir=None):
+        """Create and wrap a single environment"""
+        env = gym.make(env_name, render_mode=render_mode)
+        if monitor_dir:
+            env = Monitor(env, monitor_dir)
+        return env
     
-    # Create evaluation environment (with rendering if requested)
-    print(f"Creating evaluation environment: {env_name}")
-    eval_env = gym.make(
-        env_name,
-        render_mode="human" if render_eval else None
+    # Create training environment with VecNormalize
+    print(f"Creating training environment: {env_name}")
+    print("  Wrapping with Monitor -> DummyVecEnv -> VecNormalize")
+    print("  VecNormalize will normalize the 24 observations to have similar scales")
+    
+    # Create vectorized training environment
+    train_env = DummyVecEnv([lambda: make_env(render_mode=None, monitor_dir=log_dir)])
+    
+    # Wrap with VecNormalize - this normalizes observations and rewards
+    # norm_obs=True: normalize observations (important for BipedalWalker's 24 different-scaled obs)
+    # norm_reward=True: normalize rewards (can help with training stability)
+    # training=True: update running statistics during training
+    train_env = VecNormalize(
+        train_env,
+        norm_obs=True,      # Normalize observations (critical for BipedalWalker)
+        norm_reward=True,   # Normalize rewards
+        training=True,      # Update running statistics
+        clip_obs=10.0,      # Clip observations to prevent extreme values
+        clip_reward=10.0    # Clip rewards
     )
-    eval_env = Monitor(eval_env, os.path.join(log_dir, "eval"))
+    
+    # Create evaluation environment
+    # Note: For evaluation, we need to sync the normalization stats from training
+    print(f"Creating evaluation environment: {env_name}")
+    eval_env = DummyVecEnv([
+        lambda: make_env(
+            render_mode="human" if render_eval else None,
+            monitor_dir=os.path.join(log_dir, "eval")
+        )
+    ])
+    
+    # Wrap eval environment with VecNormalize
+    # training=False: don't update stats during eval (use existing stats)
+    eval_env = VecNormalize(
+        eval_env,
+        norm_obs=True,
+        norm_reward=False,  # Typically don't normalize rewards during eval
+        training=False,     # Don't update statistics during evaluation
+        clip_obs=10.0
+    )
     
     # Create PPO model with standard hyperparameters
     # These are default PPO settings - likely to perform poorly initially
@@ -69,8 +113,23 @@ def train_baseline_ppo(
     )
     
     # Setup callbacks
-    eval_callback = EvalCallback(
+    # Create a custom callback to sync VecNormalize stats before evaluation
+    class SyncNormalizeCallback(EvalCallback):
+        """Custom callback that syncs VecNormalize stats before evaluation"""
+        def __init__(self, *args, train_env=None, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.train_env = train_env
+        
+        def _on_step(self) -> bool:
+            # Sync normalization statistics from training to eval environment
+            if self.train_env is not None and isinstance(self.train_env, VecNormalize):
+                self.eval_env.obs_rms = self.train_env.obs_rms
+                self.eval_env.ret_rms = self.train_env.ret_rms
+            return super()._on_step()
+    
+    eval_callback = SyncNormalizeCallback(
         eval_env,
+        train_env=train_env,  # Pass training env to sync stats
         best_model_save_path=os.path.join(save_dir, "best_model"),
         log_path=os.path.join(log_dir, "eval"),
         eval_freq=eval_freq,
@@ -90,6 +149,11 @@ def train_baseline_ppo(
     print("="*60)
     print("NOTE: The walker will likely fail initially - falling over or twitching.")
     print("This is expected behavior for a baseline PPO agent.")
+    print("")
+    print("VecNormalize is active:")
+    print("  - Observations are being normalized (24 different-scaled features)")
+    print("  - Rewards are being normalized")
+    print("  - Statistics update during training")
     print("="*60)
     
     model.learn(
@@ -98,16 +162,23 @@ def train_baseline_ppo(
         progress_bar=True
     )
     
-    # Save final model
+    # Save final model and VecNormalize wrapper
     final_model_path = os.path.join(save_dir, "bipedal_walker_final")
     model.save(final_model_path)
-    print(f"\nTraining complete! Final model saved to: {final_model_path}")
+    
+    # Save the VecNormalize wrapper (contains normalization statistics)
+    vec_normalize_path = os.path.join(save_dir, "vec_normalize.pkl")
+    train_env.save(vec_normalize_path)
+    print(f"\nTraining complete!")
+    print(f"  Model saved to: {final_model_path}")
+    print(f"  VecNormalize stats saved to: {vec_normalize_path}")
+    print(f"  (VecNormalize stats are needed when loading the model for evaluation)")
     
     # Clean up
     train_env.close()
     eval_env.close()
     
-    return model
+    return model, train_env
 
 def quick_test_render(env_name="BipedalWalker-v3", n_episodes=3):
     """
