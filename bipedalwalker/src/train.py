@@ -5,18 +5,75 @@ import numpy as np
 from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import EvalCallback, CheckpointCallback
 from stable_baselines3.common.monitor import Monitor
-from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
+from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecNormalize
 import os
+import sys
+
+# Add src directory to path to import reward_wrapper
+sys.path.insert(0, os.path.dirname(__file__))
+from reward_wrapper import BipedalWalkerRewardWrapper
+
+def make_env_fn(
+    env_name,
+    rank=0,
+    render_mode=None,
+    monitor_dir=None,
+    use_reward_wrapper=True,
+    stay_upright_bonus=0.1,
+    symmetry_penalty_weight=0.1
+):
+    """
+    Create a function that makes an environment.
+    This is a top-level function to ensure it's picklable for SubprocVecEnv.
+    
+    Args:
+        env_name: Name of the environment
+        rank: Rank of the environment (for seeding)
+        render_mode: Render mode for the environment
+        monitor_dir: Directory for Monitor logging
+        use_reward_wrapper: Whether to use reward wrapper
+        stay_upright_bonus: Bonus for staying upright
+        symmetry_penalty_weight: Weight for symmetry penalty
+    
+    Returns:
+        A function that creates and returns an environment
+    """
+    def _init():
+        """Initialize and return an environment"""
+        env = gym.make(env_name, render_mode=render_mode)
+        
+        # Apply custom reward wrapper if enabled
+        if use_reward_wrapper:
+            env = BipedalWalkerRewardWrapper(
+                env,
+                stay_upright_bonus=stay_upright_bonus,
+                symmetry_penalty_weight=symmetry_penalty_weight
+            )
+        
+        # Apply Monitor wrapper for logging
+        if monitor_dir:
+            # Create unique monitor directory for each environment
+            env_monitor_dir = os.path.join(monitor_dir, f"env_{rank}") if rank is not None else monitor_dir
+            env = Monitor(env, env_monitor_dir)
+        
+        return env
+    
+    return _init
 
 def train_baseline_ppo(
     env_name="BipedalWalker-v3",
-    total_timesteps=1_000_000,
+    total_timesteps=1_000_000_000,
     render_during_training=False,
     render_eval=True,
     save_dir="./models",
     log_dir="./runs",
     eval_freq=10000,
-    n_eval_episodes=5
+    n_eval_episodes=5,
+    use_reward_wrapper=True,
+    stay_upright_bonus=0.1,
+    symmetry_penalty_weight=0.1,
+    n_envs=8,
+    use_subproc=True
 ):
     """
     Train a baseline PPO agent on BipedalWalker environment.
@@ -24,6 +81,13 @@ def train_baseline_ppo(
     
     The environment is wrapped with VecNormalize to normalize the 24 observations
     that have different scales. This helps with training stability and convergence.
+    
+    Advanced reward crafting is applied via BipedalWalkerRewardWrapper:
+    - Stay-Upright Bonus: Rewards keeping hull upright and stable
+    - Symmetry Penalty: Penalizes identical leg movements (prevents hopping)
+    
+    Uses parallel environments (SubprocVecEnv) for faster training by collecting
+    experiences from multiple environments simultaneously.
     
     Args:
         env_name: Name of the gymnasium environment
@@ -34,6 +98,11 @@ def train_baseline_ppo(
         log_dir: Directory for tensorboard logs
         eval_freq: Frequency of evaluation (in timesteps)
         n_eval_episodes: Number of episodes for evaluation
+        use_reward_wrapper: Whether to use the custom reward wrapper
+        stay_upright_bonus: Bonus reward for staying upright (per timestep)
+        symmetry_penalty_weight: Weight for symmetry penalty
+        n_envs: Number of parallel environments (8 or 16 recommended)
+        use_subproc: Whether to use SubprocVecEnv (True) or DummyVecEnv (False)
     
     Returns:
         model: Trained PPO model
@@ -43,21 +112,38 @@ def train_baseline_ppo(
     os.makedirs(save_dir, exist_ok=True)
     os.makedirs(log_dir, exist_ok=True)
     
-    # Helper function to create and wrap environment
-    def make_env(render_mode=None, monitor_dir=None):
-        """Create and wrap a single environment"""
-        env = gym.make(env_name, render_mode=render_mode)
-        if monitor_dir:
-            env = Monitor(env, monitor_dir)
-        return env
-    
     # Create training environment with VecNormalize
     print(f"Creating training environment: {env_name}")
-    print("  Wrapping with Monitor -> DummyVecEnv -> VecNormalize")
+    vec_env_type = "SubprocVecEnv" if use_subproc else "DummyVecEnv"
+    print(f"  Using {vec_env_type} with {n_envs} parallel environments")
+    if use_reward_wrapper:
+        print("  Wrapping with RewardWrapper -> Monitor -> VecEnv -> VecNormalize")
+        print("  RewardWrapper adds: Stay-Upright Bonus, Symmetry Penalty")
+    else:
+        print("  Wrapping with Monitor -> VecEnv -> VecNormalize")
     print("  VecNormalize will normalize the 24 observations to have similar scales")
     
+    # Create environment maker functions for each parallel environment
+    env_fns = [
+        make_env_fn(
+            env_name=env_name,
+            rank=i,
+            render_mode=None,
+            monitor_dir=log_dir,
+            use_reward_wrapper=use_reward_wrapper,
+            stay_upright_bonus=stay_upright_bonus,
+            symmetry_penalty_weight=symmetry_penalty_weight
+        )
+        for i in range(n_envs)
+    ]
+    
     # Create vectorized training environment
-    train_env = DummyVecEnv([lambda: make_env(render_mode=None, monitor_dir=log_dir)])
+    if use_subproc:
+        train_env = SubprocVecEnv(env_fns)
+        print(f"  ✓ Created {n_envs} parallel environments using SubprocVecEnv")
+    else:
+        train_env = DummyVecEnv(env_fns)
+        print(f"  ✓ Created {n_envs} environments using DummyVecEnv (sequential)")
     
     # Wrap with VecNormalize - this normalizes observations and rewards
     # norm_obs=True: normalize observations (important for BipedalWalker's 24 different-scaled obs)
@@ -73,14 +159,19 @@ def train_baseline_ppo(
     )
     
     # Create evaluation environment
-    # Note: For evaluation, we need to sync the normalization stats from training
+    # Note: For evaluation, we use a single environment (DummyVecEnv)
+    # and sync the normalization stats from training
     print(f"Creating evaluation environment: {env_name}")
-    eval_env = DummyVecEnv([
-        lambda: make_env(
-            render_mode="human" if render_eval else None,
-            monitor_dir=os.path.join(log_dir, "eval")
-        )
-    ])
+    eval_env_fn = make_env_fn(
+        env_name=env_name,
+        rank=0,
+        render_mode="human" if render_eval else None,
+        monitor_dir=os.path.join(log_dir, "eval"),
+        use_reward_wrapper=use_reward_wrapper,
+        stay_upright_bonus=stay_upright_bonus,
+        symmetry_penalty_weight=symmetry_penalty_weight
+    )
+    eval_env = DummyVecEnv([eval_env_fn])
     
     # Wrap eval environment with VecNormalize
     # training=False: don't update stats during eval (use existing stats)
@@ -150,10 +241,20 @@ def train_baseline_ppo(
     print("NOTE: The walker will likely fail initially - falling over or twitching.")
     print("This is expected behavior for a baseline PPO agent.")
     print("")
+    print(f"Parallel Training Configuration:")
+    print(f"  - Number of parallel environments: {n_envs}")
+    print(f"  - Environment type: {vec_env_type}")
+    print(f"  - Expected speedup: ~{n_envs}x faster data collection")
+    print("")
     print("VecNormalize is active:")
     print("  - Observations are being normalized (24 different-scaled features)")
     print("  - Rewards are being normalized")
     print("  - Statistics update during training")
+    if use_reward_wrapper:
+        print("")
+        print("Advanced Reward Crafting is active:")
+        print(f"  - Stay-Upright Bonus: {stay_upright_bonus} (rewards stable, upright posture)")
+        print(f"  - Symmetry Penalty: {symmetry_penalty_weight} (penalizes identical leg movements)")
     print("="*60)
     
     model.learn(
@@ -226,8 +327,8 @@ if __name__ == "__main__":
     parser.add_argument(
         "--total_timesteps",
         type=int,
-        default=1_000_000,
-        help="Total number of training timesteps"
+        default=10_000_000,
+        help="Total number of training timesteps (default: 10M, use --total_timesteps to override)"
     )
     parser.add_argument(
         "--render_training",
@@ -262,6 +363,35 @@ if __name__ == "__main__":
         default=10000,
         help="Frequency of evaluation (in timesteps)"
     )
+    parser.add_argument(
+        "--no_reward_wrapper",
+        action="store_true",
+        help="Disable custom reward wrapper (use default rewards)"
+    )
+    parser.add_argument(
+        "--stay_upright_bonus",
+        type=float,
+        default=0.1,
+        help="Bonus reward for staying upright (per timestep)"
+    )
+    parser.add_argument(
+        "--symmetry_penalty",
+        type=float,
+        default=0.1,
+        help="Weight for symmetry penalty (penalizes identical leg movements)"
+    )
+    parser.add_argument(
+        "--n_envs",
+        type=int,
+        default=8,
+        choices=[1, 2, 4, 8, 16],
+        help="Number of parallel environments (8 or 16 recommended for speed)"
+    )
+    parser.add_argument(
+        "--no_subproc",
+        action="store_true",
+        help="Use DummyVecEnv instead of SubprocVecEnv (sequential, slower but more stable)"
+    )
     
     args = parser.parse_args()
     
@@ -277,6 +407,11 @@ if __name__ == "__main__":
             render_eval=not args.no_render_eval,
             save_dir=args.save_dir,
             log_dir=args.log_dir,
-            eval_freq=args.eval_freq
+            eval_freq=args.eval_freq,
+            use_reward_wrapper=not args.no_reward_wrapper,
+            stay_upright_bonus=args.stay_upright_bonus,
+            symmetry_penalty_weight=args.symmetry_penalty,
+            n_envs=args.n_envs,
+            use_subproc=not args.no_subproc
         )
 
