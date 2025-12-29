@@ -20,7 +20,7 @@ class BipedalWalkerRewardWrapper(gym.Wrapper):
         env: gym.Env,
         stay_upright_bonus: float = 0.1,
         min_hull_height: float = 0.5,
-        symmetry_penalty_weight: float = 0.0,
+        symmetry_penalty_weight: float = 0.1,
         joint_velocity_bonus_weight: float = 0.02
     ):
         """
