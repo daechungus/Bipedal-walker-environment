@@ -1,0 +1,172 @@
+# Research Log Guide
+
+This guide explains how to use the research log system to track experiments, metrics, and failures for your ablation studies.
+
+## Overview
+
+The research log system automatically tracks:
+- **Baseline**: What you're starting from
+- **Variables**: What you changed
+- **Metrics**: Mean Reward, Max Distance, Stability Score
+- **Failures**: What didn't work and why
+- **Pivots**: How failures led to new ideas
+
+## Automatic Tracking
+
+When you run training, the research log automatically:
+1. Creates an experiment entry
+2. Tracks metrics during evaluation
+3. Logs final results
+4. Exports a report-ready markdown file
+
+### Basic Usage
+
+```bash
+# Training automatically logs to research log
+python src/train.py --total_timesteps 500000
+
+# Specify experiment ID for structured ablation study
+python src/train.py --experiment_id A --experiment_name "DDPG Baseline"
+
+# Experiment B: Add reward wrapper
+python src/train.py --experiment_id B --experiment_name "DDPG + Reward Wrapper" --stay_upright_bonus 0.1
+
+# Experiment C: Different reward settings
+python src/train.py --experiment_id C --experiment_name "DDPG + High Reward" --stay_upright_bonus 0.2
+```
+
+## Recording Failures
+
+When something doesn't work, record it:
+
+```bash
+python src/record_failure.py \
+    --experiment_id B \
+    --failure "High speed reward caused front flips" \
+    --hypothesis "Rewarding high forward velocity would encourage walking" \
+    --reason "Over-incentivized forward momentum at cost of balance" \
+    --pivot "Added hull-angle penalty to counter front flips"
+```
+
+Or use the Python API:
+
+```python
+from research_log import ResearchLog
+
+research_log = ResearchLog(log_file="./runs/research_log.json")
+research_log.record_failure(
+    experiment_id="B",
+    failure_description="High speed reward caused front flips",
+    hypothesis="Rewarding high forward velocity would encourage walking",
+    reason="Over-incentivized forward momentum at cost of balance",
+    pivot="Added hull-angle penalty to counter front flips"
+)
+```
+
+## Viewing Results
+
+### View Summary
+
+```python
+from research_log import ResearchLog
+
+research_log = ResearchLog(log_file="./runs/research_log.json")
+print(research_log.get_summary())
+```
+
+### Export Report
+
+The training script automatically exports a markdown file at:
+```
+./runs/experiments_for_report.md
+```
+
+You can also export manually:
+
+```python
+from research_log import ResearchLog
+
+research_log = ResearchLog(log_file="./runs/research_log.json")
+research_log.export_for_report("./my_report.md")
+```
+
+## Structured Ablation Study Format
+
+For your PDF report, structure experiments like this:
+
+### Experiment A: DDPG (Baseline)
+- **Baseline:** DDPG with default settings
+- **Variables:** None
+- **Results:** Mean Reward: -100.5 ± 15.2, Max Distance: 0.5
+
+### Experiment B: DDPG + Observation Normalization
+- **Baseline:** DDPG
+- **Variables:** VecNormalize enabled
+- **Results:** Mean Reward: -85.3 ± 12.1, Max Distance: 2.3
+
+### Experiment C: DDPG + Observation Normalization + Reward Shaping
+- **Baseline:** DDPG + VecNormalize
+- **Variables:** Stay-Upright Bonus: 0.1, Symmetry Penalty: 0.1
+- **Results:** Mean Reward: -50.2 ± 8.5, Max Distance: 15.7
+
+## Tracked Metrics
+
+The research log automatically tracks:
+
+1. **Mean Reward**: Average reward across evaluation episodes
+2. **Std Reward**: Standard deviation of rewards
+3. **Max/Min Reward**: Best and worst episode rewards
+4. **Mean Distance**: Estimated distance traveled (from episode length)
+5. **Max Distance**: Maximum distance in any episode
+6. **Mean Episode Length**: Average episode duration
+7. **Stability Score**: Combined metric (0-1, higher is better)
+   - Based on reward consistency and episode lengths
+   - Higher = more stable performance
+
+## Example Workflow
+
+1. **Baseline Experiment:**
+   ```bash
+   python src/train.py --experiment_id A --experiment_name "DDPG Baseline" --total_timesteps 500000
+   ```
+
+2. **Add Feature:**
+   ```bash
+   python src/train.py --experiment_id B --experiment_name "DDPG + VecNormalize" --total_timesteps 500000
+   ```
+
+3. **If it fails, record it:**
+   ```bash
+   python src/record_failure.py \
+       --experiment_id B \
+       --failure "VecNormalize caused instability" \
+       --hypothesis "Normalization would stabilize training" \
+       --reason "Normalization stats updated too quickly" \
+       --pivot "Reduced normalization update rate"
+   ```
+
+4. **Pivot and try again:**
+   ```bash
+   python src/train.py --experiment_id C --experiment_name "DDPG + Slow Normalize" --total_timesteps 500000
+   ```
+
+5. **View results:**
+   ```bash
+   # Check the exported markdown file
+   cat runs/experiments_for_report.md
+   ```
+
+## Tips
+
+- **Use consistent experiment IDs**: A, B, C for simple ablation, or EXP_001, EXP_002 for more experiments
+- **Record failures immediately**: Don't wait - document what didn't work while it's fresh
+- **Be specific in pivots**: Explain exactly how the failure led to the next idea
+- **Compare metrics**: Use the summary to compare Mean Reward and Stability Score across experiments
+- **Export regularly**: The markdown export is perfect for copy-pasting into your report
+
+## File Locations
+
+- **Research Log JSON**: `./runs/research_log.json`
+- **Exported Report**: `./runs/experiments_for_report.md`
+- **TensorBoard Logs**: `./runs/` (for detailed training curves)
+

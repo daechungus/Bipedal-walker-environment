@@ -1,0 +1,239 @@
+# Diagnosing Slow Leg Movement - Ablation Study Guide
+
+When the walker doesn't move its legs fast enough, here's what to investigate in your ablation studies:
+
+## 1. Track These Metrics in Your Research Log
+
+Add these to your experiments to diagnose the issue:
+
+### Key Metrics to Track:
+- **Joint Angular Velocities** (`obs[8-11]`): How fast are the joints moving?
+  - Low values (< 0.5 rad/s) = slow leg movement
+  - Target: Should see values > 1.0 rad/s for active walking
+  
+- **Action Magnitudes**: Are actions too conservative?
+  - Track `np.mean(np.abs(action))` - should be > 0.3 for active movement
+  - If actions are consistently small (< 0.2), the agent is being too cautious
+
+- **Forward Velocity** (`obs[2]`): Is the walker actually moving?
+  - Should increase over training if legs are moving properly
+  - Compare across experiments
+
+- **Episode Length**: Longer episodes = more movement
+  - If episodes are very short, walker is falling quickly (different issue)
+  - If episodes are long but no forward progress, legs aren't moving enough
+
+## 2. Reward Function Analysis
+
+### Experiment A: Increase Forward Progress Bonus
+**Hypothesis**: Current bonus (0.05) is too small to incentivize movement
+
+```python
+# In reward_wrapper.py, line 130
+forward_bonus = 0.15 * max(0, forward_velocity)  # Increased from 0.05
+```
+
+**What to track:**
+- Mean forward velocity in research log
+- Does this increase leg movement speed?
+- Does it cause instability (falling)?
+
+### Experiment B: Add Joint Velocity Bonus
+**Hypothesis**: Directly reward faster leg movement
+
+```python
+# Add to reward_wrapper.py after forward_bonus
+joint_velocities = obs[8:12] if len(obs) > 11 else [0, 0, 0, 0]
+joint_velocity_bonus = 0.02 * np.mean(np.abs(joint_velocities))  # Reward leg movement speed
+```
+
+**What to track:**
+- Joint angular velocities (should increase)
+- Does this help without causing instability?
+
+### Experiment C: Reduce Stay-Upright Bonus Dominance
+**Hypothesis**: Stay-upright bonus might be encouraging stillness
+
+```python
+# In reward_wrapper.py, line 92
+# Reduce the stay_upright_bonus weight or make it less dominant
+stay_upright_bonus = self.stay_upright_bonus * angle_reward * stability_reward * 0.5  # Reduce by 50%
+```
+
+**What to track:**
+- Does reducing this allow more movement?
+- Does stability decrease too much?
+
+### Experiment D: Check Stability Reward Penalty
+**Hypothesis**: The stability reward might be penalizing movement
+
+```python
+# In reward_wrapper.py, line 89
+# Current: stability_reward = np.exp(-0.5 * abs(hull_angular_vel))
+# This heavily penalizes ANY angular velocity - might be too strict
+stability_reward = np.exp(-0.2 * abs(hull_angular_vel))  # More forgiving
+```
+
+**What to track:**
+- Does this allow more leg movement?
+- Does the walker become unstable?
+
+## 3. Hyperparameter Experiments
+
+### Experiment E: Increase OU Noise Sigma
+**Hypothesis**: More exploration noise = more varied leg movements
+
+```bash
+python src/train.py --ou_sigma 0.3 --experiment_id E --experiment_name "Higher OU Sigma"
+```
+
+**What to track:**
+- Action magnitudes (should increase)
+- Does this help explore faster movements?
+
+### Experiment F: Adjust Learning Rate
+**Hypothesis**: Learning rate might be too low to learn fast movements
+
+```python
+# In train.py, DDPG initialization
+learning_rate=1e-3,  # Increased from 3e-4
+```
+
+**What to track:**
+- Training stability
+- Does faster learning help?
+
+### Experiment G: Network Architecture
+**Hypothesis**: Larger networks might learn more complex movement patterns
+
+```python
+# In train.py, DDPG initialization
+policy_kwargs=dict(net_arch=[512, 512, 256]),  # Larger network
+```
+
+## 4. Action Space Investigation
+
+### Check Action Clipping
+The environment might be clipping actions. Check:
+- Are actions being normalized/clipped somewhere?
+- What's the actual action range being used?
+
+### Experiment H: Action Scaling
+**Hypothesis**: Actions might need to be scaled up
+
+```python
+# In reward_wrapper.py, you could scale actions (but this is tricky)
+# Better: Check if VecNormalize is affecting actions
+```
+
+## 5. Diagnostic Code to Add
+
+Add this to your reward wrapper to track leg movement:
+
+```python
+# In reward_wrapper.py, add to step() method
+joint_velocities = obs[8:12] if len(obs) > 11 else [0, 0, 0, 0]
+mean_joint_velocity = np.mean(np.abs(joint_velocities))
+mean_action_magnitude = np.mean(np.abs(action))
+
+# Add to info for logging
+info['diagnostics'] = {
+    'mean_joint_velocity': float(mean_joint_velocity),
+    'mean_action_magnitude': float(mean_action_magnitude),
+    'forward_velocity': float(obs[2]) if len(obs) > 2 else 0.0
+}
+```
+
+Then in TensorBoard or your research log, track these values.
+
+## 6. Structured Ablation Study
+
+Run these experiments in order:
+
+1. **Baseline**: Current setup
+   - Track: joint velocities, action magnitudes, forward velocity
+
+2. **Increase Forward Bonus**: 0.05 → 0.15
+   - Compare: Does forward velocity increase? Do legs move faster?
+
+3. **Add Joint Velocity Bonus**: +0.02 per unit velocity
+   - Compare: Do joint velocities increase?
+
+4. **Reduce Stability Penalty**: Make stability reward more forgiving
+   - Compare: Does this allow more movement?
+
+5. **Increase OU Noise**: sigma 0.2 → 0.3
+   - Compare: More exploration = faster learning of movements?
+
+6. **Combine Best**: Take best from above experiments
+   - Final comparison
+
+## 7. Red Flags to Look For
+
+In your research log, watch for:
+
+- **Joint velocities consistently < 0.5**: Legs are too slow
+- **Action magnitudes < 0.2**: Agent is too conservative
+- **Forward velocity not increasing**: Legs moving but not effectively
+- **High stability score but low movement**: Over-penalizing movement
+- **Short episodes**: Falling quickly (different problem)
+
+## 8. Quick Diagnostic Script
+
+Create a script to analyze a trained model:
+
+```python
+# diagnose_movement.py
+import gymnasium as gym
+from stable_baselines3 import DDPG
+import numpy as np
+
+model = DDPG.load("path/to/model")
+env = gym.make("BipedalWalker-v3")
+
+obs, _ = env.reset()
+joint_velocities = []
+action_magnitudes = []
+forward_velocities = []
+
+for _ in range(1000):
+    action, _ = model.predict(obs, deterministic=False)
+    obs, _, done, _, _ = env.step(action)
+    
+    joint_velocities.append(np.mean(np.abs(obs[8:12])))
+    action_magnitudes.append(np.mean(np.abs(action)))
+    forward_velocities.append(obs[2])
+    
+    if done:
+        obs, _ = env.reset()
+
+print(f"Mean Joint Velocity: {np.mean(joint_velocities):.3f}")
+print(f"Mean Action Magnitude: {np.mean(action_magnitudes):.3f}")
+print(f"Mean Forward Velocity: {np.mean(forward_velocities):.3f}")
+```
+
+## 9. Most Likely Fixes (in order of probability)
+
+1. **Increase forward progress bonus** (0.05 → 0.15-0.2)
+2. **Add joint velocity bonus** (directly reward leg speed)
+3. **Reduce stability penalty** (make it more forgiving of movement)
+4. **Increase OU noise sigma** (more exploration)
+5. **Check if actions are being clipped** (environment limitation)
+
+## 10. Recording in Research Log
+
+For each experiment, record:
+
+```python
+# In your research log
+research_log.record_failure(
+    experiment_id="A",
+    failure_description="Legs move too slowly - joint velocities < 0.5 rad/s",
+    hypothesis="Forward bonus too small to incentivize movement",
+    reason="0.05 bonus insufficient compared to stay-upright bonus dominance",
+    pivot="Increased forward bonus to 0.15 and added joint velocity bonus"
+)
+```
+
+This systematic approach will help you identify exactly what's causing slow leg movement and how to fix it.
+
