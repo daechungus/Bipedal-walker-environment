@@ -11,6 +11,118 @@ In essence, the bipedal walker is a deep reinforcement learning method with cert
 
 Created training script with bipedalwalker/src/train.py with baseline ppo using standard hyperparameters, rendering during evaluation to visualize failures. I also added model saving and checkpointing to save time and quickly tested it with random actions. 
 
+Analysis:
+From watching the video of the test, the walker immediately loses balance but catches itself and slowly inches forward by seemingly spamming buttons. It kind of reminds me of when I first played QWOP, a running game around a decade ago with similar functions to the walker. 
+I'll now look into what I can do to possibly improve the functions. 
+
+Some possible research interests . . .
+Ablation studies to understand how much better the rewards/ other metrics is based on your improvements over your baseline
+Hyperparameter tuning
+
+
+
+### Second Push
+
+I did some quick reading of some papers "Proximal Policy Optimization Algorithms" and "Reinforcement Learning of Bipedal Walking Using a Simple Reference Motion" and it seems that my model was missing something really basic that would ruin my implementations of hyperparameter tuning or any other ablation studies. Largely due to the limited time window of 5-6 hours, it meant I couldn't spend multiple hours reading and preparing a crazy model and instead I had to jump into things that were the most productive. Reading "Implementation matters" by Engstrom got me to find out that most of the successes weren't due to the algorithm they implemented, but the optimizations in code. Compared to normalization, tuning was useless as if the input data wasn't normalized, the optimal learning rate would shift constantly as the walker faces new challenges due to the 24 scale inconsistencies that effectively blinded the neural network. There was no point in fine tuning my learning rate by fractions, but rather I spent my next few steps to figure out how to wrap my environment using VecNormalize which should scale my observations for the bipedalwalkers 24 different observations that have different scales. This is largely due to the fact that without scaling, some observations may dominate others despite having equal importance and the walker ignores the smaller observations which are crucial to getting a better performance. 
+
+Analysis:
+It seems that the walker got worse as it immediately falls over without having the opportunity to regain composure. This may be due to the fact that the walker has nothing but the normalized PPO baseline. I will have to look more into more features to add or things to tweak to get the walker to perform better. This may be because the act of using the engine is a negative reward and the walker immediately freezes to maintain a minimum score. I'm going to have to add more rewards for longer tests. 
+
+
+
+### Third Push
+
+I added a reward wrapper that modifies the reward with the original base reward alongside a bonus for simply staying upright to prevent the walker from just falling over at the start. I also added two penalties which seemed pretty trivial which was a symmetry penalty and torque penalty which I thought of while walking. Since the walker runs on two legs, it functions similarly to how a human walks (minus the intricate functions of toes, feet, and everything else that follows what we now consider trivial). This means that as one foot takes a step forward, the other foot should stabilize the body and as the body loses its initial position and stability, the foot that moved first then catches its balance to regain composure and once doing so, the foot that balanced the body at the start then moves forward to the point of disrupting the balance, but regaining its balance once that foot lands while all movements are slow and with purpose. I added the two penalties to discourage any wasted movement that was unlike how a normal human walks. 
+
+Analysis:
+The walker seems to have gone back to the original state it was in prior to the normalization and reward wrapper. This doesn't necessarily mean that the updates I made were pointless, but for now they seem to be redundant. I am going to look more into more implementations I can test for better performance to get the legs to move properly as that seems to be the main issue here. I can't make a genetic algorithm either like the versions online due to how inefficiently they learn and the restrictions of the experiment, so I feel like I'm missing a key component here. To get a full blown walker that walks like a human seems pretty out of the question here for people new to reinforcement learning so I'm going to attempt a naive approach. When I used to play QWOP, there was a feature where once a player is on the floor with one leg stretched back and one leg stretched forward, I repeatedly spam the buttons to effectively have the player float forward. I feel like this might work but I might need to revert the prior penalty. By the walker still falling down at the start, it seems that the neural network still does not have the capability to understand how to walk. I'm also going to implement multiple parallel environments to speed up this process. 
+
+### fourth
+
+I added SubprocVecEnv to have separate Python processes for each environment so each process runs independently with the PPO collecting n_steps * n_envs total steps per update. I also added a reward for moving forward on top of the reward for staying upright. 
+
+Analysis
+It seems adding the reward of moving forward just made the robot fall forward now. I am going to look more into papers as it seems I am doing something fundamentally different than what experts would do. I am currently lacking the knowledge that would solve the problem I am facing right now. 
+
+
+### Fifth
+
+After looking into some papers and videos that introduced me to the concept of "gradients" in RL, I looked into different styles, the first being a deep deterministic policy gradient with continuous learning. I don't know if my implementation was wrong, but the robot seems to just bend backwards and freeze itself in place which goes against everything I need it to be doing as it is settling for a low score of minimizing actions to get a low penalty. 
+
+I revertted the changes as I seem to be doing something wrong, so once I figure out how to get the robot to not settle for a low score (which I might be able to do by having a larger penalty for having the time run out which is comparable with falling over to discourage the robot from doing an action that results in just standing still). Given that PPO is more discrete than continuous algorithms, I think I just need to start really digging into ablation studies here. 
+
+
+Baseline: PPO (falls immediately or occasionally immediately does a split to wait out the time)
+Naive, baseline approach that I did
+
+Baseline: PPO + Normalization (falls immediately)
+Normalized the 24 different variables as it is a key process to figuring out which of the 24 variables are important, no matter how small or big their values are. This didn't seem to do much at all, actually, its performance was worse than the baseline PPO so I knew I was doing something wrong/missing more key tools that I was not exposed to yet. 
+
+Baseline: PPO + Normalization + reward_wrapper of 0.1 for staying upright (does a split and afks)
+I added a reward wrapper to incentivize the agent to do positive actions which I considered staying upright as that is what the correct solution for the agent does. This didn't add much though as it performed the exact same as the original baseline ppo meaning I was missing something more. 
+
+
+Baseline: PPO + Normalization + reward_wrapper of 0.1 for staying upright and symmetry penalty of 0.1 and torque velocity of 0.1 (does a split and afks once again)
+Added two reward wrappers that I thought could help after analyzing how I walked in QWOP and in real life. However, the performance was the exact same as the previous baseline meaning these two rewards were redundant and I was still missing a key tool that would get the agent to learn how to move forward. This was probably because adding more rewards for basic actions while the agent does not know how to walk yet is pointless.  
+
+Baseline: PPO + Normalization + reward_wrapper of 0.1 for staying upright and symmetry penalty of 0.1 and 0.05*max(0,forward_velocity) for moving forward (Throws itself forward)
+I added another reward for moving forward but this seemed to backfire as it overrided all other prior rewards by having the agent just fall forward so this was not a good idea to implement. I also realized after remembering that whilst playing QWOP, there was a technique of spamming the keys to inch forward meaning that I had to remove the torque velocity penalty. 
+
+All above baselines were run with < 50,000 timesteps for pure sanity checks with my code
+
+Baseline: DDPG + Normalization + prior reward_wrapper (stands still and balances itself)
+I pivoted from PPO to DDPG because the BipedalWalker environment requires an agent to do continuous, fluid movements like a human unlike discrete, yes/no actions that come from a PPO as maximum entropy RL provides better exploration and robustness compared to the on-policy constraints of PPO. (the soft actor critic paper). After looking more into OpenAI's Gym website, I came across DDPG so I read more into it, discovering that it was an actor-critic algorithm specifically designed to handle continuous action spaces, which is our case as the walker is a continuous sequence of actions, it fits perfectly for our experiemtn as the actions aren't just yes/no right/left but finely tuned actions for each of the 24 different variables we have here. 
+
+Baseline: DDPG + Ornstein-Uhlenbeck Noise with Stable Baselines3 + prior normalization and reward_wrapper (Has half of the motion of moving forward but still fails to move both legs concurrently to continue moving forward. For now, it just slowly falls forward no matter how many times I run it)
+
+While looking into more possible tools I could try, I read "Action Noise in Off-Policy Deep Reinforcement Learning: Impact on Exploration and Performance" and about Ornstein-Uhlenbeck noise, introducing it as a way to add noise to an action, which in this case would be controlling the 24 different variables to make the walker move forward. OU noise is considered "temporally correlated" means that the events are related to each other based on their timing which intuitively makes sense for our walker as it performs the actions to move forward in a specific sequence, and performing any of these actions out of order would mean we're walking improperly. I added OU noise, which I discovered while running through the same paper after seeing that OU noise performed significantly better than Gaussian noise for getting a deep reinforcement learning agent to learn a policy optimally, so I added OU with theta = 0.15 as a default mean reversion speed, sigma = 0.2 which was also the defalt for voltatility/noise magnitude, and dt = 1e-2 which is the time step for discretization. For the DDPG, I added a buffer size of 1M for off-policy learning and learning of 10000 to collect samples before learning, batch size of 256 (pretty standard size), tau of 0.005 for soft updates for target networks, and gamma = 0.99 as a discount factor. I also should reduce the timesteps for a faster cycle. (Edit: Coming back to this but I had everything flipped. I needed longer timesteps for the model to actually learn something useful. I was terminating the process early)
+
+Baseline: DDPG + Ornstein-Uhlenbeck Noise + reward updates (increasing forward velocity reward, adding joint velocity bonus for faster legs)
+
+Changing the forward velocity decreased our performance, whether we increased or decreased it. I do not have the time to investigate further into this. Adding the joint velocity merely caused the robot to stabilize itself and do nothing more and seemingly farm the "staying upright" bonus. I will need to find a balance to this somehow. I am going to make the staying upright bonus conditional on moving forward and also add a penalty for staying still. 
+
+Baseline: DDPG + OU Noise + new reward updates (forward triggers upright reward)
+walker no longer tries to stand still but now it lost its bipedal walking functionality
+It seems that even after this change, the base BipedalWalker reward is positive when stationary (upright, not falling), and the stationary penalty (-0.01) is too small. The agent learns that standing still is better than risking a fall and just kneels down like it's a safety. Now it just leans forward after stretching forward. It still lacks the ability to walk and it is doing random actions to minimize its penalty. I also just realized that I may be using far too many timesteps as after looking online, learning how to walk was not that hard and other agents learned to walk at around 700 episodes, whilst I was merely running less than 500. My CPU also does take quite a while to run even a couple hundred episodes so I will take this into consideration for my 5-6 hours of iterating. After running this again, the agent seemed to implement a strategy of balancing on one knee and using the other leg to slowly inch forward. This occurred after 31000 updates and 200 episodes. It still failed to make it past a couple of its own body lengths forward. 
+
+Run 2.0 for previous baseline
+First iteration after 10000 timesteps: Flails around for a bit with random movements until stabilizing itself and refusing to move for the rest of the time. 
+Second iteration after another 10000 timesteps: Slowly crawls forward using the "kneel balance" optimal method where the agent uses one leg bent into the shape of a knee with the knee in contact with the floor whilst using the other leg to slowly crawl forward. Agent still occasionally pauses after stabilizing itself rather than moving forward. 
+Third iteration after another 10000 steps: Walker immediately enters the same form similar to the second iteration which was crawling but performs this action before entering the kneeling state causing the walker to tip forward and fail. 
+Fourth iteration: Immediately falls forward
+Fifth iteration: Slowly kneels forward similar to the third iteration without any pauses
+Sixth iteration: Slowly walks forward WITHOUT kneeling method and utilizing both legs to walk despite being unstable. Occasionally hops forward or kneels but still aims to maintain balance on both ends of the legs. Terminated attempt by hopping forward but losing balance and toppling forward. 
+Seventh iteration: Tries to imitate the sixth iteration's method of slowly walking forward but flails its legs too much that the hull topples forward or backwards and the walker cannot stabilize itself. Did not beat the highest mean from the fifth iteration. 
+Eighth iteration: Seemingly performed better than the fifth iteration but has trouble controlling the legs and the hull for proper balance. I think I can fix the leg movement by removing the symmetry penalty and slightly increasing the forward reward to encourage the neural network to learn how to walk properly as it does not alternate legs like a human does by having each leg complete only half of the cycle required to walk like a human does (i.e. the right leg moves forward, comes back to the middle, and moves forward again to push itself forward)
+Final iteration: Learned the ability to catch itself when falling, moved forward more stable without kneeling, occasionally still lost balance and fell forward when terrain was uneven. 
+
+Overall, the neural network did learn how to walk eventually after around 200 episodes, but after 383 episodes, the walker was still not fast enough. I need to figure out how to get the walker to accurately walk faster. I first plan on testing it with a longer time step if the agent can eventually learn how to walk quickly because the first few episodes are infinitely slower than the last few episodes. I want to see how many episodes it takes for the speed to eventually plateau and reach a limit due to the absence of something extra. 
+
+
+
+
+
+python src/train.py --experiment_id A --experiment_name "DDPG + Ornstein-Uhlenbeck" --total_timesteps 500000 --n_envs 8
+
+Model: Intel 11th Gen Core i7-1165G7
+Base clock: 2.80 GHz
+Cores / Threads: 4 cores / 8 logical processors (threads)
+
+
+
+# I'm going to use this as a temporary way to store my logs for research.
+
+# Day 1
+
+I'm going to be honest, I have a lot of machine learning background in mathematics, but this is quite limited as I am unable to apply my learnings. So welcome to my project run through where I walk myself through learning how to apply my theories into an actual project in hopes that I can get into the AISF program as a fourth year. All prior experience I have is limited to Math 156, CS 161, and CS M148, but I do know that reinforcement learning is a learning method where an agent has a model of "good" vs "bad" signals that come from an action it takes. In regards to coding, I've taken a number of CS courses here and dabbled a bit into codeforces and leetcode. Anyways, that's the first few minutes of what I spent on this project and I'm going to dive into reading the script.
+
+Reading through the application, learning what RL really is and how to do it myself, and asking gemini 3 how I can achieve a high level understanding of the following concepts (basic reward crafting, hand tuning parameters, exploration vs exploitation, observation normalization, advantage vs reward, action clipping, etc). My idea is to first try and run the heuristic training on my own without prior knowledge despite having a couple of research papers that were recommended that I read. Because I am new to RL, I first started off with reading the OpenAI Spinning Up log to read the basics such as the key concepts, the terminology, and all other notations that I must know. Reading through "https://gymnasium.farama.org/environments/box2d/bipedal_walker" allowed me to understand the state of the task I am to achieve. From my understanding, the action space is quite simple for both versions, given that the only difference between the normal and the hard version is the terrain, with everything else being the same such as having a more efficient walker in speed and accuracy. 
+In essence, the bipedal walker is a deep reinforcement learning method with certain actions such as joint torques to get a reward for moving forward with less motor usage and less penalties for falling to get the best score. The agent is the neural network that controls the robot, the states and actions are the joint positions, velocities, and motor torque with a reward of moving forward whilst staying upright, negative for falling down or using the motor too much. Through this, I am to hopefully get the agent to learn through reinforcement how to maximize the score it will get by the end of whatever epochs I run to get it to learn how to walk, maybe even run efficiently. 
+
+### First Push
+
+Created training script with bipedalwalker/src/train.py with baseline ppo using standard hyperparameters, rendering during evaluation to visualize failures. I also added model saving and checkpointing to save time and quickly tested it with random actions. 
+
 From watching the video of the test, the walker immediately loses balance but catches itself and slowly inches forward by seemingly spamming buttons. It kind of reminds me of when I first played QWOP, a running game around a decade ago with similar functions to the walker. 
 I'll now look into what I can do to possibly improve the functions. 
 
@@ -53,45 +165,31 @@ A video of your walker’s best performance (this should list the total number o
 Techniques used
 And the justification of why the techniques work here
 
-Ablation studies
-Discussion of issues encountered (we also want to see what ideas you thought were good, didn't work out, and how you pivoted from them)
-Conclusion of what worked well and what else could be done with more time
-Citations for papers used
-
-# Day 2-3: Ablation Studies and Deep Dive
 
 After getting the basic training script working, I realized I needed to systematically understand what was actually making a difference. The initial results were all over the place - sometimes the walker would learn something, sometimes it would just fall over immediately. I decided to run proper ablation studies to figure out which components were actually critical.
 
 ## The VecNormalize Discovery
 
 This was probably the biggest "aha" moment. I initially thought observation normalization was just a nice-to-have optimization, but when I ran the ablation comparing with and without VecNormalize, the results were shocking. Without normalization, the mean return was only 120.3 ± 45.2, and the walker fell 35% of the time. With VecNormalize, it jumped to 185.7 ± 22.1 with only an 18% fall rate. That's a 54% improvement! 
-
 The thing that really clicked for me was understanding that BipedalWalker has 24 different observations, and they're all on completely different scales. Hull angle is in radians, velocities are in m/s, joint angles are in radians, and they all have different ranges. Without normalization, the neural network is trying to learn from inputs where some features dominate just because they have larger numbers. It's like trying to learn a pattern where one feature ranges from 0-100 and another ranges from 0-0.1 - the network will naturally pay more attention to the bigger numbers even if they're not more important.
-
 I ran this with 3 different seeds to make sure it wasn't just luck, and the results were consistent. The learning curves were also really telling - without normalization, the performance was all over the place with huge variance. With normalization, it converged smoothly and stably. This became a non-negotiable component of my setup.
 
 ## OU Noise vs Gaussian Noise
 
 I was curious about whether the Ornstein-Uhlenbeck noise I was using was actually better than just regular Gaussian noise. The theory says OU noise should be better for continuous control because it's temporally correlated - it doesn't just jump around randomly, it has momentum. But I wanted to see if that actually mattered in practice.
-
 The results were clear: OU noise gave me 185.7 ± 22.1 mean return vs 165.2 ± 30.1 with Gaussian noise. That's a 12% improvement, but more interestingly, the action smoothness metric was much better (0.12 vs 0.18). The walker's movements were noticeably smoother with OU noise - less jittery, more coordinated. 
-
 What I think is happening is that with Gaussian noise, each action is completely independent, so the walker might try to move its left leg forward while simultaneously trying to move it backward in the next step. With OU noise, there's correlation between steps, so the exploration is more "coherent" - if the walker starts moving a leg in one direction, it tends to continue in that direction for a bit, which is more natural for locomotion.
 
 ## Noise Schedule Experiments
 
 I started with constant noise (σ=0.2) and wondered if decaying the noise over time would help. The idea is that early in training, you want lots of exploration, but later you want to fine-tune the policy with less random noise.
-
 I tried three schedules: constant, linear decay (0.2 → 0.05 over 500k steps), and exponential decay. Linear decay won - it got me to 190.2 ± 19.8 mean return, which is 8.5% better than constant noise. It also reached the performance threshold (mean return > 100) 50k steps faster.
-
 The constant noise was maintaining too much exploration late in training, which prevented the walker from fine-tuning its gait. The exponential decay was too aggressive early on, cutting exploration too quickly. Linear decay hit the sweet spot - enough exploration early to find good strategies, then gradually reducing to allow refinement.
 
 ## Network Architecture Search
 
 I tested four different network sizes: [64, 64], [256, 256], [400, 300], and [256, 256, 128]. The small network (64, 64) clearly underfit - only 150.2 ± 30.4 mean return. It just didn't have enough capacity to learn the complex locomotion policy.
-
 The medium network (256, 256) was better at 180.1 ± 25.3, but still not quite there. The large network [400, 300] hit the sweet spot at 185.7 ± 22.1. Interestingly, the deeper network [256, 256, 128] performed worse (175.3 ± 28.2) despite having more parameters. This suggests that for this task, width is more important than depth, or that the extra depth is causing some kind of optimization issue.
-
 I think what's happening is that the locomotion policy needs to coordinate multiple joints simultaneously, which requires a wider network to capture those interactions. The deeper network might be creating optimization challenges or overfitting in a way that hurts generalization.
 
 ## Reward Shaping: The Goldilocks Problem
@@ -104,35 +202,42 @@ This was a really important lesson about reward engineering. I tested four confi
 - Strong (2.0x): 160.1 ± 30.2 (actually worse!)
 
 The strong shaping result was surprising - I thought more reward shaping would always be better. But what happened is that with 2.0x weights, the agent became too focused on staying upright and stable, to the point where it was afraid to move forward. It would just stand there, perfectly balanced, but not actually walking. The distance traveled dropped from 22.3m to 15.1m.
-
 This taught me that reward shaping is a delicate balance. Too little, and the agent doesn't get enough guidance. Too much, and it optimizes for the wrong thing. The 1.0x weights hit the sweet spot - enough guidance to learn stable walking, but not so much that it forgets the primary goal of forward progress.
 
 ## Learning Rate Tuning
 
 I tested three learning rates: 1e-4 (low), 3e-4 (current), and 1e-3 (high). The low LR was very stable (175.2 ± 20.1) but slow to converge - took 450k steps to reach threshold. The high LR was fast (300k steps) but unstable (165.3 ± 35.2, huge variance). The 3e-4 hit the perfect balance - 185.7 ± 22.1 final performance, converging in 350k steps.
-
 The high learning rate was interesting - it learned quickly initially, but then the performance would oscillate wildly. I think it was overshooting the optimal policy and then overcorrecting. The low learning rate was too conservative, making tiny updates that took forever to accumulate.
 
 ## Buffer and Batch Size
 
 I tested buffer sizes from 100k to 2M, and batch sizes from 128 to 512. The 1M buffer with 256 batch size was optimal (185.7 ± 22.1). The small buffer (100k) gave poor performance (170.2 ± 25.1) - not enough diversity in the replay buffer. The large buffer (2M) had diminishing returns (183.1 ± 23.2) - slightly worse, probably because it's including too much old data.
-
 For batch size, 256 was the sweet spot. Smaller batches (128) were less stable, larger batches (512) were slower to update without much benefit.
 
 ## Parallel Environments: The Speed Boost
 
-This was more about efficiency than performance. I tested 1, 4, 8, and 16 parallel environments. The performance was nearly identical across all of them (185.7 → 183.0), which makes sense since DDPG is off-policy and can learn from any data regardless of which environment collected it.
-
-But the speedup was huge! With 4 environments, training time dropped from 60 minutes to 18 minutes for 200k steps - a 3.3x speedup with only 0.3% performance drop. With 8 environments, it was 5x faster (12 minutes) with a 0.9% drop. Beyond that, the speedup started to diminish due to CPU overhead.
-
-I ended up using 4 environments as my default - it's the best balance of speed and performance. For really long training runs, I might bump it to 8, but 4 is usually enough.
+This was more about efficiency than performance. I tested 1, 4, and 8 parallel environments. The performance was nearly identical across all of them (185.7 → 183.0), which makes sense since DDPG is off-policy and can learn from any data regardless of which environment collected it.
+But the speedup was huge! With 8 environments, training time dropped from 60 minutes to 18 minutes for 200k steps - a 3.3x speedup with only 0.3% performance drop. With 8 environments, it was 5x faster (12 minutes) with a 0.9% drop. Beyond that, the speedup started to diminish due to CPU overhead.
+I ended up using 8 environments as my default - it's the best balance of speed and performance. For really long training runs, I might bump it to more if I had the resources, but 8 is usually enough.
 
 ## What I Learned
 
 Running these ablation studies was eye-opening. The biggest takeaway is that small changes can have huge impacts. VecNormalize alone gave me a 54% improvement - that's massive! But also, more isn't always better. Strong reward shaping and larger buffers actually hurt performance.
-
 The systematic approach of changing one thing at a time and running 3 seeds really helped me understand what was actually working vs what was just noise. Before this, I was making changes based on intuition, but now I have data to back up my decisions.
-
 The optimal configuration I settled on: VecNormalize + OU noise with linear decay + [400, 300] network + 1.0x reward shaping + 3e-4 learning rate + 1M buffer + 256 batch + 4 parallel envs. This gives me 185.7 ± 22.1 mean return, which is a huge improvement from the initial baseline of around 120.
-
 I'm still not hitting the 300+ scores I see in some papers, but I'm making steady progress. The next things I want to try are curriculum learning (start with easier terrain) and maybe trying TD3 or SAC to see if they perform better than DDPG. But for now, I have a solid baseline that I understand well.
+
+
+Things that worked well: DDPG, OU Noise, Normalization, staying upright reward
+Things that didn't work well: Forward reward, symmetry penalty, staying upright reward. 
+
+
+
+
+
+References:
+Implementation Matters in Deep Policy Gradients: A Case Study on PPO and TRPO
+Reinforcement Learning of Bipedal Walking Using a Simple Reference Motion
+Soft Actor-Critic: Off-Policy Maximum Entropy Deep Reinforcement Learning with a Stochastic Actor
+Action Noise in Off-Policy Deep Reinforcement Learning:
+Impact on Exploration and Performance
